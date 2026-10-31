@@ -2237,9 +2237,11 @@ local function addallactions()
 		return {
 			dontselectbyselectbox = true,
 			rpc = function(act)
-				SendRPCToServer(RPC.LeftClick, ACTIONS[actionid].code, act.target:GetPosition().x,
-					act.target:GetPosition().z,
-					act.target, nil, nil, ACTIONS[actionid].canforce, ACTIONS[actionid].mod_name)
+				if ACTIONS[actionid] then
+					SendRPCToServer(RPC.LeftClick, ACTIONS[actionid].code, act.target:GetPosition().x,
+						act.target:GetPosition().z,
+						act.target, nil, nil, ACTIONS[actionid].canforce, ACTIONS[actionid].mod_name)
+				end
 			end,
 		}
 	end
@@ -5135,9 +5137,10 @@ AddClassPostConstruct("widgets/invslot", function(self)
 							end
 						end)
 					end
-					if not item or KEY_util:MoveKeyDown() then
+					if not item or not item:IsValid() or KEY_util:MoveKeyDown() then
 						task:Cancel()
 						task = nil
+						return
 					end
 
 					SendRPCToServer(RPC.DropItemFromInvTile, item, wholestack or nil)
