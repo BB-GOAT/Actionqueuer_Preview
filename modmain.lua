@@ -3,13 +3,15 @@ GLOBAL.setmetatable(env, {
         return GLOBAL.rawget(GLOBAL, k)
     end
 })
+local _G = GLOBAL
+local KnownModIndex = _G.KnownModIndex
 
 if not KnownModIndex:IsModEnabledAny("workshop-3136701076") then
     print("[黑化排队论 · 动作预览] 检测到黑化排队论本体未开启，停止加载！")
     return
 end
 
-if not rawget(GLOBAL, "BBGOAT_utils") then
+if not rawget(_G, "BBGOAT_utils") then
     if TUNING.suggest_to_subscribe_bbgoat_basementmod then
         return
     end
@@ -29,15 +31,15 @@ if not rawget(GLOBAL, "BBGOAT_utils") then
 	end
 
 	local _languages = {
-		zh = true, --Chinese for Steam
-		zhr = true, --Chinese for WeGame
-		ch = true, --Chinese mod
-		chs = true, --Chinese mod
-		sc = true, --simple Chinese
-		chinese = true, --Chinese mod
-		zht = true, --traditional Chinese for Steam
-		tc = true, --traditional Chinese
-		cht = true, --Chinese mod
+		zh = true, -- Steam 中文
+		zhr = true, -- WeGame 中文
+		ch = true, -- 中文语言模组
+		chs = true, -- 中文语言模组
+		sc = true, -- 简体中文
+		chinese = true, -- 中文语言模组
+		zht = true, -- Steam 繁体中文
+		tc = true, -- 繁体中文
+		cht = true, -- 中文语言模组
 	}
 	local lang = _G.LanguageTranslator and _G.LanguageTranslator.defaultlang
 	local isCH = lang and _languages[lang]
@@ -95,448 +97,19 @@ if not rawget(GLOBAL, "BBGOAT_utils") then
     return
 end
 
-Upvaluehelper = GLOBAL.BBGOAT_utils.Upvaluehelper -- 来自冰冰羊的模组运行库
-MOD_util = rawget(GLOBAL, "MOD_util") -- 来自萌萌的新-基础运行库
+local Upvaluehelper = _G.BBGOAT_utils.Upvaluehelper
+local MOD_util = rawget(_G, "MOD_util")
 if not MOD_util then
-    print("[黑化排队论 · 动作预览] 未检测萌萌的新-基础运行库模组被开启。停止加载本模组")
+    print("[黑化排队论 · 动作预览] 未检测到萌萌的新-基础运行库，停止加载")
     return
 end
 
-local _ActionQueuer
+Assets = {
+    Asset("ANIM", "anim/farm_soil.zip"),
+}
 
--- 基本定义（来自黑化排队论模组）
-local farm_spacing
-local farm3x3_offset
-local GetHeadingDir
-local double_snake
-local GetAccessibleTilePosition
-local easy_stack
-local mouse_controls
-local default_aq_queuekey
-local IsHUDEntity -- HUD
-
-local last_Width_Height_String = ""
-
--- 兼容几何布局
-local gp_mod = KnownModIndex:IsModEnabledAny("workshop-351325790")
-local gp_mod_Snap = nil
-local gp_mod_CTRL_setting
-
--- 兼容耕地对齐
-local st_mode = function()
-    return ThePlayer and ThePlayer.components and ThePlayer.components.snaptiller and ThePlayer.components.snaptiller.snapmode or 0
-end
-
-if gp_mod then
-    AddClassPostConstruct("components/builder_replica", function(inst)
-        gp_mod_Snap = Upvaluehelper.GetUpvalue(inst.MakeRecipeAtPoint,"Snap")
-    end)
-    gp_mod_CTRL_setting = function()
-        return GLOBAL.GetModConfigData("CTRL","workshop-351325790")
-    end
-else
-    print("[黑化排队论 · 动作预览] 未检测到几何布局模组开启")
-end
-
-local ActionQueuerPreview = {}
-
-function ActionQueuerPreview:SelectionBox(rightclick)
-    self.update_selection = function()
-        self:SetPreview(rightclick)
-    end
-    -- 框选线程
-    self.selection_preview_thread = StartThread(function() -- 该线程按帧刷新
-        while self.inst:IsValid() do
-            if self.queued_preview_movement then
-                self.update_selection()
-                self.queued_preview_movement = false
-            end
-
-            Sleep(FRAMES)
-        end
-        self:ClearSelectionPreviewThread() -- 清除旧框选线程
-    end, "actionqueue_selection_preview_thread")
-end
-
--- 工具
-local function MergeList(...)
-    local mTable = {}
-    for _, v in ipairs({ ... }) do
-        if type(v) == "table" then
-            for _, k in pairs(v) do
-                table.insert(mTable, k)
-            end
-        end
-    end
-    return mTable
-end
-
--- 获取鼠标上的物品
-function GetActiveItem(prefab)
-    local item = ThePlayer.replica.inventory:GetActiveItem()
-    if not prefab or not item then
-        return item
-    end
-    local prefabs = type(prefab) == "table" and prefab or { prefab }
-    return table.contains(prefabs, item.prefab) and item
-end
-
-function ActionQueuerPreview:GetEquippedItemInHand()
-    return self.inst.replica.inventory:GetEquippedItem(EQUIPSLOTS.HANDS)
-end
-
--- 获取所有物品(物品名，标签，满足函数，获取物品的顺序) [当且仅当order=="mouse"时，才会包括鼠标上的物品]
-local function GetItemsFromAll(prefab, needtags, func, order)
-    local order_all = { "container", "backpack", "equip", "body", "mouse" }
-    local result = {}
-    local invent = ThePlayer.replica.inventory
-    local items = {
-        body = invent:GetItems(),
-        equip = invent:GetEquips(),
-        mouse = { GetActiveItem() },
-        backpack = {},
-        container = {}
-    }
-
-    for container_inst, _ in pairs(invent:GetOpenContainers() or {}) do
-        local container = (container_inst and container_inst.replica and container_inst.replica.container) or
-        (container_inst and container_inst.replica and container_inst.replica.inventory)
-        if container then
-            if container_inst:HasTag("INLIMBO") then
-                items.backpack = MergeList(items.backpack, container:GetItems())
-            else
-                items.container = MergeList(items.container, container:GetItems())
-            end
-        end
-    end
-
-    local t = type(order)
-    if order == "mouse" then
-        order = order_all
-    elseif t == "string" and order_all[order] then
-        order = { order }
-    elseif t == "table" then
-        -- do nothing
-    else
-        order = { "container", "backpack", "equip", "body" }
-    end
-
-    local all_items = {}
-    for _, o in ipairs(order) do
-        if items[o] then
-            all_items = MergeList(all_items, items[o])
-        end
-    end
-
-    needtags = type(needtags) == "string" and { needtags } or (type(needtags) == "table" and needtags)
-    for _, item in pairs(all_items) do
-        if (not prefab or prefab == item.prefab or (type(prefab) == "table" and table.contains(prefab, item.prefab))) and
-            (not needtags or item:HasTags(needtags)) and (not func or func(item)) then
-            table.insert(result, item)
-        end
-    end
-    return result
-end
-
--- 获取耐久度
-local function GetPercent(inst)
-    local i = 100
-    local classified = type(inst) == "table" and inst.replica and inst.replica.inventoryitem and
-        inst.replica.inventoryitem.classified
-    if classified then
-        if inst:HasOneOfTags({ "fresh", "show_spoilage" }) and classified.perish then
-            i = math.floor(classified.perish:value() / 0.62)
-        elseif classified.percentused then
-            i = classified.percentused:value()
-        end
-    end
-    return i
-end
-
-local function GetAPrefabCount(prefab)
-    local count = 0
-    for _, ent in ipairs(GetItemsFromAll(prefab, nil, nil, { "container", "backpack", "body", "mouse" }) or {}) do
-        -- 萌萌的新的版本只会怼着一个地方施肥，所以不处理
-
-        -- count = (ent and ent.replica and (ent.replica.inst and
-        --         (
-        --            ent.replica.inst.prefab == "fertilizer" and -- 便便桶
-        --             math.ceil(GetPercent(ent.replica.inst) / 10) -- 可使用10次，所以除以10（所以不兼容修改了物品使用次数的MOD）
-        --         or ent.replica.inst.prefab == "soil_amender_fermented" and -- 超级催长剂
-        --             math.ceil(GetPercent(ent.replica.inst) / 20) -- 可使用5次，所以除以20（所以不兼容修改了物品使用次数的MOD）
-        --         ))
-        --     or ent.replica.stackable and ent.replica.stackable:StackSize() or 1) + count
-        count = (ent.replica.stackable and ent.replica.stackable:StackSize() or 1) + count -- 否则按堆叠数算
-    end
-
-    return count
-end
-
-function ActionQueuerPreview:GetActiveItem()
-    return self.inst.replica.inventory:GetActiveItem()
-end
-
-function ActionQueuerPreview:GetStartValue(spacing, snap_farm, tile_or_wall)
-    if not self.TL then
-        return
-    end
-
-    local heading, dir = GetHeadingDir()
-    local diagonal = heading % 2 ~= 0
-    local X, Z = "x", "z"
-    if dir then
-        X, Z = Z, X
-    end
-    local spacing_x = self.TL[X] > self.TR[X] and -spacing or spacing
-    local spacing_z = self.TL[Z] > self.BL[Z] and -spacing or spacing
-    local adjusted_spacing_x = diagonal and spacing * 1.4 or spacing
-    local adjusted_spacing_z = diagonal and spacing * 0.7 or spacing
-    local width = math.floor(self.TL:Dist(self.TR) / adjusted_spacing_x)
-    local height = math.floor(self.TL:Dist(self.BL) / (width < 1 and adjusted_spacing_x or adjusted_spacing_z))
-    if height >= 1 then
-        height = self.endless_deploy and 100 or height -- 萌萌的新写的..
-    end
-
-    local talker_string = (width + 1).."×"..(height + 1)
-    if last_Width_Height_String ~= talker_string then -- 如果长宽有变化
-        ThePlayer.components.talker:Say(talker_string) -- 玩家读出预计放置长宽
-        last_Width_Height_String = talker_string
-    end
-    local start_x, _, start_z = self.TL:Get()
-    local terraforming = false
-
-    if tile_or_wall == "tile" then
-        start_x, _, start_z = TheWorld.Map:GetTileCenterPoint(start_x, 0, start_z)
-        terraforming = true
-    elseif tile_or_wall == "wall" then
-        start_x, start_z = math.floor(start_x) + 0.5, math.floor(start_z) + 0.5
-    elseif snap_farm then
-        local tilecenter = Point(TheWorld.Map:GetTileCenterPoint(start_x, 0, start_z)) -- center of tile
-        local tilepos = Point(tilecenter.x - 2, 0, tilecenter.z - 2)                   -- corner of tile
-        if tilecenter.x % 4 == 0 then                                                  -- if center of tile is divisible by 4, then it's a medium/huge server
-            farm3x3_offset = farm_spacing                                              -- adjust offset for medium/huge servers for 3x3 grid
-        end
-        start_x, start_z = math.floor(start_x / farm_spacing) * farm_spacing + farm3x3_offset,
-            math.floor(start_z / farm_spacing) * farm_spacing + farm3x3_offset
-    elseif type(self.deploy_on_grid) == "number" then -- 210201 null: deploy_on_grid = last to avoid conflict with farm grids (blizstorm)
-        start_x, start_z = math.floor(start_x * 2 + 0.5) * 0.5, math.floor(start_z * 2 + 0.5) * 0.5
-    end
-
-    local cur_pos = Point()
-    local count = {
-        x = 0,
-        y = 0,
-        z = 0
-    }
-    local row_swap = 1
-
-    -- 210127 null: added support for snaking within snaking for faster deployment (thanks to blizstorm)
-    local step = 1
-    local countz2 = 0
-    local countStep = { { 0, 1 }, { 1, 0 }, { 0, -1 }, { 1, 0 } }
-    if height < 1 then
-        countStep = { { 1, 0 }, { 1, 0 }, { 1, 0 }, { 1, 0 } }
-    end -- 210130 null: bliz fix (210127)
-
-    return start_x, start_z, terraforming, width, height, spacing_x, spacing_z, X, Z, diagonal, cur_pos, count,
-        row_swap, step, countz2, countStep
-end
-
-function ActionQueuerPreview:GetPosList(spacing, snap_farm, tow, istill, maxsize, meta, compat_gp_mod)
-    local ent = meta.ent
-    local func = meta.func_pos
-    local ret = {}
-    local i = 0
-    maxsize = type(maxsize) == "number" and maxsize or self.preview_max
-    maxsize = maxsize > self.preview_max and self.preview_max or maxsize
-    local start_x, start_z, terraforming, width, height, spacing_x, spacing_z, X, Z, diagonal, cur_pos, count, row_swap,
-    step, countz2, countStep = self:GetStartValue(spacing, snap_farm, tow)
-    if not start_x then
-        return ret
-    end
-    while self.inst:IsValid() do
-        cur_pos.x = start_x + spacing_x * count.x
-        cur_pos.z = start_z + spacing_z * count.z
-        if diagonal then
-            if width < 1 then
-                if count[Z] > height then break end
-                count[X] = count[X] - 1
-                count[Z] = count[Z] + 1
-            else
-                local row = math.floor(count.y / 2)
-                if count[X] + row > width or count[X] + row < 0 then
-                    count.y = count.y + 1
-                    if count.y > height then break end
-                    row_swap = -row_swap
-                    count[X] = count[X] + row_swap - 1
-                    count[Z] = count[Z] + row_swap
-                    cur_pos.x = start_x + spacing_x * count.x
-                    cur_pos.z = start_z + spacing_z * count.z
-                end
-                count.x = count.x + row_swap
-                count.z = count.z + row_swap
-            end
-        else
-            if double_snake then -- 210127 null: snake within snake deployment (thanks to blizstorm)
-                if count[X] > width or count[X] < 0 then
-                    countz2 = countz2 +
-                        2 -- assume first that next major row can be progressed since this is the case most of the time (blizstorm)
-
-                    -- if countz2 > height then -- old bliz code (210115)
-                    if countz2 + 1 > height then -- 210130 null: bliz fix (210127)
-                        -- if countz2 - 1 > height then -- old bliz code (210115)
-                        -- if countz2 - 1 <= height then -- old bliz code (210122)
-                        if countz2 <= height then -- 210130 null: bliz fix (210127)
-                            -- countz2 = countz2 - 1 -- old bliz code (210115)
-                            countStep = { { 1, 0 }, { 1, 0 }, { 1, 0 }, { 1, 0 } }
-                        else
-                            break
-                        end
-                    end
-
-                    step = 1
-                    row_swap = -row_swap
-                    count[X] = count[X] + row_swap
-                    count[Z] = countz2
-                    cur_pos.x = start_x + spacing_x * count.x
-                    cur_pos.z = start_z + spacing_z * count.z
-                end
-                count[X] = count[X] + countStep[step][1] * row_swap
-                count[Z] = count[Z] + countStep[step][2]
-                step = step % 4 + 1
-            else -- Regular snaking deployment
-                if count[X] > width or count[X] < 0 then
-                    count[Z] = count[Z] + 1
-                    if count[Z] > height then break end
-                    row_swap = -row_swap
-                    count[X] = count[X] + row_swap
-                    cur_pos.x = start_x + spacing_x * count.x
-                    cur_pos.z = start_z + spacing_z * count.z
-                end
-                count[X] = count[X] + row_swap
-            end
-        end
-
-        if not func or func(cur_pos) then
-            local accessible_pos = cur_pos
-            if terraforming then -- terraforming 指的是当前行为位置是否为地皮中心点（比如挖地皮、放地皮、给农田浇水、给农田施肥，都是往地皮中心点操作的）
-                if ent and (ent:HasTag("fertilizer") or ent.prefab == "wateringcan" or ent.prefab == "premiumwateringcan") then -- 如果在施肥、浇水
-                    if not TheWorld.Map:IsFarmableSoilAtPoint(cur_pos.x, 0, cur_pos.z) then -- 如果操作的位置不是农田区
-                        accessible_pos = false -- 取消预览
-                    end
-                elseif ent and (ent.prefab == "pitchfork" or ent.prefab == "goldenpitchfork") then -- 草叉/金草叉
-                    accessible_pos = not TheWorld.Map:CanPlaceTurfAtPoint(cur_pos.x, 0, cur_pos.z) and accessible_pos or false -- 当前位置不能放新地皮则false
-                elseif ent and ent:HasTag("groundtile") then -- 地皮
-                    accessible_pos = TheWorld.Map:CanPlaceTurfAtPoint(cur_pos.x, 0, cur_pos.z) and accessible_pos or false -- 当前位置可以放地皮则继续
-                else
-                    accessible_pos = GetAccessibleTilePosition(cur_pos) -- 否则将操作位置设置为中心点
-                end
-            elseif istill then -- 210117 null: 检查pos是否已耕作
-                for _, ent in pairs(TheSim:FindEntities(cur_pos.x, 0, cur_pos.z, 0.05, { "soil" })) do
-                    if not ent:HasTag("NOCLICK") then
-                        accessible_pos = false
-                        break
-                    end -- 跳过此耕地位置
-                end
-            elseif ThePlayer.replica.inventory and
-                    ThePlayer.replica.inventory:GetActiveItem() and
-                    ThePlayer.replica.inventory:GetActiveItem().replica and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem.CanDeploy and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem:IsDeployable(self.inst) and  -- 鼠标拿着物品&是可以部署的
-                    not ( -- 不满足可以放置在此点位的要求
-                        ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem:CanDeploy(
-                            accessible_pos and gp_mod_Snap and gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and gp_mod_Snap(cur_pos) or cur_pos, -- 兼容几何布局校准后的点位
-                            nil, ThePlayer,
-                            meta.rotation or nil
-                        )
-                    )
-                    or ThePlayer.components.playercontroller and ThePlayer.components.playercontroller.placer and ThePlayer.components.playercontroller.placer_recipe and not -- 鼠标上打包的建筑是否可以放置
-                        TheWorld.Map:CanDeployRecipeAtPoint(
-                            accessible_pos and gp_mod_Snap and gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and gp_mod_Snap(cur_pos) or cur_pos, -- 兼容几何布局校准后的点位
-                            ThePlayer.components.playercontroller.placer_recipe,
-                            ThePlayer.components.playercontroller.placer:GetRotation(),
-                            ThePlayer
-                    )
-            then
-                accessible_pos = false
-            end
-
-            if accessible_pos and gp_mod_Snap and not compat_gp_mod then  -- 如果获取到几何布局的对齐网格点函数 and 当前不为丢弃物品操作
-                if gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and not snap_farm then -- 启用网格对齐&不在耕地状态(耕地的点位对齐不符合要求)
-                    accessible_pos = gp_mod_Snap(accessible_pos)
-                end
-            end
-
-            if accessible_pos then
-                i = i + 1
-                local pos = Point(accessible_pos:Get())
-                ret[tostring(pos)] = pos
-                if i >= maxsize then
-                    break
-                end
-            end
-        end
-    end
-    return ret
-end
-
-function ActionQueuerPreview:SpawnPreview(pos, meta)
-    if not self.preview_able then
-        return
-    end
-    -- 不在不可种 和 已经种的表
-    local id = tostring(pos)
-    if not self.preview_eds[id] and not self.preview_curs[id] then
-        local ent
-        local me = meta.ent
-        if me then
-            meta.prefab, meta.skin, meta.skin_id = me.prefab, me.skinname, me.skin_id
-        end
-        if not ent then
-            ent = SpawnPrefab(meta.prefab, meta.skin, meta.skin_id, self.userid)
-            ent.persists = false
-            ent:AddTag("fx")
-            ent:AddTag("NOBLOCK")
-            ent:AddTag("NOCLICK")
-        end
-        if ent and ent.Transform then
-            ent.Transform:SetPosition(pos:Get())
-            if meta.rotation then
-                ent.Transform:SetRotation(meta.rotation)
-            end
-            local scale = meta.scale
-            if type(scale) == "number" then
-                ent.Transform:SetScale(scale, scale, scale)
-            end
-            self.preview_curs[id] = ent
-            -- 处理变色逻辑
-            local anim = ent.AnimState
-            if anim then
-                anim:SetLightOverride(self.preview_highlight)
-                if not self.preview_dont_color then
-                    local r, g, b, t = unpack(self.preview_color)
-                    anim:OverrideMultColour(r, g, b, t)
-                    anim:SetAddColour(r, g, b, t)
-                end
-            end
-        end
-    end
-end
-
-function ActionQueuerPreview:DeployToPreview(meta, spacing, snap, tow, istill, maxsize, compat_gp_mod)
-    local ret = self:GetPosList(spacing, snap, tow, istill, maxsize, meta, compat_gp_mod)
-
-    for id, pos in pairs(ret or {}) do
-        self:SpawnPreview(pos, meta)
-    end
-
-    for id, ent in pairs(self.preview_curs or {}) do
-        if not ret[id] then
-            ent:Remove()
-            self.preview_curs[id] = nil
-        end
-    end
+local function GetOption(name, default)
+    return MOD_util:GetMOption(name, default)
 end
 
 -- 不预览的物品
@@ -549,509 +122,552 @@ local Blacklist = {
     farm_plow_item = true, -- 耕地机 -- 萌萌的新的版本不能排队放置 -- ToDo: 我的预判也不大准确 横着放会少预判一个？ 20250702
 }
 
-function ActionQueuerPreview:SetPreview(rightclick)
-    -- 初始位置, 最终位置, 间隔，上限-》预览
+local FindDeployHintItem -- 查找背包相同物品函数
 
-    -- 萌萌的新的版本不能判断selected_ents，先删了
-    -- if next(_ActionQueuer.selected_ents) then
-    --     return ActionQueuer:ClearPreview()
-    -- end
-    if rightclick then
-        local active_item = self:GetActiveItem()
+local function IsValid(inst)
+    return inst ~= nil and inst.IsValid ~= nil and inst:IsValid()
+end
 
-        if active_item then
-            if Blacklist[active_item.prefab] then -- 黑名单物品
-                return ActionQueuerPreview:ClearPreview()
-            end
-
-            if easy_stack[active_item.prefab] then -- 种植小木牌的
-                local ent = TheInput:GetWorldEntityUnderMouse()
-                if ent and ent:HasTag(easy_stack[active_item.prefab]) then
-                    return ActionQueuerPreview:ClearPreview()
-                end
-            end
-
-            if active_item:HasTag("fertilizer") then -- 手里拿的是肥料
-                -- 最好是贴图
-                self:DeployToPreview({
-                    ent = active_item
-                }, 4, false, "tile", false, GetAPrefabCount(active_item.prefab))
-                return
-            end
-            if ThePlayer:HasTag("plantkin") and active_item:HasTag("deployedfarmplant") then -- 沃姆伍德种植
-                local placer = self.inst.components.playercontroller.deployplacer
-                if not self.TL then
-                    return
-                end
-                local cx, cz = (self.TL.x + self.BR.x) / 2,
-                    (self.TR.z + self.BL.z) / 2                                         -- Get SelectionBox() center coords
-                if (cx and cz) and TheWorld.Map:IsFarmableSoilAtPoint(cx, 0, cz) then   -- if center = soil tile
-                    -- 最好是贴图
-                    self:DeployToPreview({
-                        prefab = placer.prefab,
-                        skin = placer.skinname,
-                        skin_id = placer.skin_id,
-                        rotation = placer.Transform:GetRotation()
-                    }, farm_spacing, true, false, false, GetAPrefabCount(active_item.prefab))
-                else -- 最好是贴图
-                    self:DeployToPreview({
-                        prefab = placer.prefab,
-                        skin = placer.skinname,
-                        skin_id = placer.skin_id,
-                        rotation = placer.Transform:GetRotation()
-                    }, farm_spacing, false, false, false, GetAPrefabCount(active_item.prefab))
-                end
-                return
-            end
-
-            if active_item:HasTag("groundtile") then -- 手里拿的是地皮
-                self:DeployToPreview({
-                    ent = active_item
-                }, 4, false, "tile", false, GetAPrefabCount(active_item.prefab))
-                return
-            end
-
-            if active_item.replica.inventoryitem and active_item.replica.inventoryitem:IsDeployable(self.inst) then -- 如果鼠标上是允许放置的则放置
-                local placer = self.inst.components.playercontroller.deployplacer
-                if placer then
-                    local tile_or_wall
-                    if active_item:HasOneOfTags({ "groundtile", "tile_deploy" }) then
-                        tile_or_wall = "tile"
-                    elseif (active_item:HasTag("wallbuilder") or active_item:HasTag("fencebuilder")) then
-                        tile_or_wall = "wall"
-                    end
-                    self:DeployToPreview({
-                        prefab = placer.prefab,
-                        skin = placer.skinname,
-                        skin_id = placer.skin_id,
-                        rotation = placer.Transform:GetRotation()
-                    }, self:GetDeploySpacing(active_item), false, tile_or_wall, false, GetAPrefabCount(active_item.prefab))
-                end
-            else -- 否则丢弃
-                -- 最好是贴图
-                self:DeployToPreview({
-                    ent = active_item
-                }, 1 --[[GetDropSpacing(active_item)]], false, "wall", false, GetAPrefabCount(active_item.prefab), true)
-            end
-            return
-        end
-
-        local equip_item = self:GetEquippedItemInHand()
-        if equip_item and equip_item:HasActionComponent("terraformer") then -- 可以影响地形的...比如草叉
-            return self:DeployToPreview({
-                ent = equip_item,
-                scale = 2
-            }, 4, false, "tile", false)
-        elseif equip_item and (equip_item.prefab == "wateringcan" or equip_item.prefab == "premiumwateringcan") then -- 装备着浇水壶/鸟嘴壶
-            -- 210202 null: first check if selection box is being used
-            if not self.TL or (math.abs(self.TL.x - self.BR.x) + math.abs(self.TR.z - self.BL.z) < 1) then -- if single click
-            else
-                return self:DeployToPreview({
-                    ent = equip_item,
-                    scale = 2
-                }, 4, false, "tile", false)
-            end
-        elseif equip_item and equip_item:HasActionComponent("farmtiller") then
-            if not (st_mode() == 0) then
-            else
-            return self:DeployToPreview({
-                prefab = "farm_soil",
-                func_pos = function(pos)
-                    return TheWorld.Map:CanTillSoilAtPoint(pos:Get())
-                end
-            }, farm_spacing, true, false, true)
-            end
-        end
-    elseif self.inst.components.playercontroller.placer then
-        -- local Blacklist = {
-        -- }
-        -- if self.inst.components.playercontroller.placer.prefab and Blacklist[self.inst.components.playercontroller.placer.prefab] then return end
-
-        local playercontroller = self.inst.components.playercontroller
-        local recipe = playercontroller.placer_recipe
-        local spacing = recipe.min_spacing or 3.2
-        local placer = playercontroller.placer
-        return self:DeployToPreview({
-            prefab = placer.prefab,
-            skin = placer.skinname,
-            skin_id = placer.skin_id,
-            rotation = placer:GetRotation()
-        }, spacing, false, false, false)
+-- 只保存生成外观所需的信息，避免后续刷新依赖已经被游戏移除的源实体
+local function FromSource(source, rotation, scale)
+    if IsValid(source) and source.prefab then
+        return {
+            prefab = source.prefab, skin = source.skinname, skin_id = source.skin_id,
+            rotation = rotation, scale = scale,
+        }
     end
 end
 
-function ActionQueuerPreview:ClearPreview()
-    for _, ent in pairs(self.preview_curs or {}) do
-        if type(ent) == "table" and ent.entity and ent:IsValid() and ent.Transform then
-            ent:Remove()
+-- 建筑使用建筑放置虚影（placer）；部署物优先使用部署虚影，其他物品保留真实实体外观
+local function GetSpec(queuer, item)
+    local controller = queuer.inst and queuer.inst.components.playercontroller
+    if item == nil and controller and controller.placer_recipe and IsValid(controller.placer) then
+        return FromSource(controller.placer, controller.placer.Transform:GetRotation())
+    end
+
+    local source = FindDeployHintItem(queuer, item)
+    if source == nil or Blacklist[source.prefab] then
+        return
+    end
+
+    local inventory = queuer.inst.replica.inventory
+    -- 装备工具时：耕地显示土堆，挖地皮和浇水显示放大的工具实体
+    if inventory:GetActiveItem() == nil then
+        if source.HasActionComponent and source:HasActionComponent("farmtiller") then
+            return { prefab = "farm_soil" }
+        elseif source.HasActionComponent and source:HasActionComponent("terraformer") or source.prefab == "wateringcan" or source.prefab == "premiumwateringcan" then
+            return FromSource(source, nil, 2)
         end
     end
-    self.preview_curs = {}
-    self.preview_eds = {}
-end
-
-
-function ActionQueuerPreview:RemovePreview(pos)
-    -- 预览相关
-    local id = tostring(pos)
-    self.preview_eds[id] = true
-    local ent = self.preview_curs[id]
-    if type(ent) == "table" and ent.entity and ent:IsValid() and ent.Transform then
-        ent:Remove()
+    if source:HasTag("groundtile") or source:HasTag("fertilizer") then -- 地皮、施肥
+        return FromSource(source)
     end
-    self.preview_curs[id] = nil
+    local inventoryitem = source.replica and source.replica.inventoryitem
+    local wormwood_seed = queuer.inst:HasTag("plantkin") and source:HasTag("deployedfarmplant")
+    if wormwood_seed or inventoryitem and inventoryitem:IsDeployable(queuer.inst) then
+        local placer = controller and controller.deployplacer
+        return IsValid(placer) and FromSource(placer, placer.Transform:GetRotation()) or FromSource(source)
+    end
+    return FromSource(source)
 end
 
-----------------------------------------------------------------------------------------------------------
+-- 记录返回值数量，转发被包装函数时保留中间及末尾的 nil
+local function Pack(...)
+    return { n = select("#", ...), ... }
+end
 
--- 清除框选(预览)线程
-function ActionQueuerPreview:ClearSelectionPreviewThread()
-    if self.selection_preview_thread then
-        if self.selection_thread then
-            KillThreadsWithID(self.selection_thread.id)
+-- 预览只执行客户端分支；生成和删除均为同步调用，结束后恢复原来的世界标志
+local function InClientWorld(fn, ...)
+    local TheWorld = _G.TheWorld
+    local old_ismastersim = TheWorld.ismastersim
+    TheWorld.ismastersim = false
+    local result = Pack(fn(...))
+    TheWorld.ismastersim = old_ismastersim
+    return unpack(result, 1, result.n)
+end
+
+local function SpawnPreview(spec, userid)
+    -- 执行完整预制体构造，保留皮肤、符号替换、组件及其他模组的初始化效果
+    local inst = InClientWorld(SpawnPrefab, spec.prefab, spec.skin, spec.skin_id, userid)
+    if inst == nil then return end
+    if not IsValid(inst) or inst.Transform == nil or inst.AnimState == nil then
+        if IsValid(inst) then InClientWorld(inst.Remove, inst) end
+        return
+    end
+    inst.persists = false
+    for _, tag in ipairs({ "fx", "FX", "DECOR", "NOCLICK", "NOBLOCK", "CLASSIFIED" }) do inst:AddTag(tag) end
+    inst._aq_preview_entity = true
+    -- 保存构造时的颜色，后续可恢复原色及原始透明度
+    inst._aq_preview_mult = { inst.AnimState:GetMultColour() }
+    inst._aq_preview_add = { inst.AnimState:GetAddColour() }
+    inst._aq_preview_scale = { inst.Transform:GetScale() }
+    inst._aq_preview_rotation = inst.Transform:GetRotation()
+    inst:Hide()
+    return inst
+end
+
+local function EmptyPreview()
+    -- 不支持或生成失败时放入无动画的空实体，维持标记池接口，不回退成本体小木牌
+    local inst = CreateEntity()
+    inst.entity:AddTransform()
+    inst.entity:AddAnimState()
+    inst.persists = false
+    inst._aq_preview_entity = true
+    inst._aq_preview_empty = true
+    for _, tag in ipairs({ "FX", "DECOR", "NOCLICK", "NOBLOCK", "CLASSIFIED" }) do inst:AddTag(tag) end
+    inst:Hide()
+    return inst
+end
+
+-- 设置外观/颜色
+local function StylePreview(inst, spec)
+    inst.Transform:SetRotation(spec.rotation or inst._aq_preview_rotation)
+    if spec.scale ~= nil then
+        inst.Transform:SetScale(spec.scale, spec.scale, spec.scale)
+    else
+        inst.Transform:SetScale(unpack(inst._aq_preview_scale))
+    end
+    local state = inst.AnimState
+    state:SetMultColour(unpack(inst._aq_preview_mult))
+    state:SetLightOverride(GetOption("preview_highlight", 0.3))
+    if GetOption("preview_dont_color", false) then
+        state:OverrideMultColour(1, 1, 1, 1)
+        state:SetAddColour(unpack(inst._aq_preview_add))
+    else
+        local colour = PLAYERCOLOURS[GetOption("preview_color", "GREEN")] or PLAYERCOLOURS.GREEN
+        state:OverrideMultColour(unpack(colour))
+        state:SetAddColour(unpack(colour))
+    end
+end
+
+local function InstallVisuals(queuer)
+    if type(queuer) ~= "table" then return false, "未找到本体队列" end
+    for _, name in ipairs({ "GetDeployHintMarker", "SetDeployHintMarkerAnim", "RefreshDeployHint",
+        "HideUnusedDeployHintMarkers", "ClearDeployHint" }) do
+        if type(queuer[name]) ~= "function" then return false, "本体缺少预览接口：" .. name end
+    end
+    FindDeployHintItem = Upvaluehelper.GetUpvalue(queuer.RefreshDeployHint, "FindDeployHintItem")
+    if type(FindDeployHintItem) ~= "function" then return false, "无法取得本体物品查找函数" end
+
+    local old_GetDeployHintMarker = queuer.GetDeployHintMarker
+    local old_SetDeployHintMarkerAnim = queuer.SetDeployHintMarkerAnim
+    local old_HideUnusedDeployHintMarkers = queuer.HideUnusedDeployHintMarkers
+    local old_ClearDeployHint = queuer.ClearDeployHint
+
+    queuer.SetDeployHintMarkerAnim = function(self, marker, ...)
+        -- 完整预制体已自行设置动画和皮肤，跳过本体的通用动画替换
+        if not marker or not marker._aq_preview_entity then return old_SetDeployHintMarkerAnim(self, marker, ...) end
+    end
+    queuer.GetDeployHintMarker = function(self, index, spacing, item, ...)
+        local drawing = self._aq_preview_draw
+        local spec = drawing and drawing.spec or (not drawing and GetSpec(self, item))
+        self.deploy_hint_markers = self.deploy_hint_markers or {}
+        local current = self.deploy_hint_markers[index]
+        -- Paint 已按坐标对应旧实体；这里只比较 prefab 名称，其他外观变化直接更新。
+        if not IsValid(current) or current._aq_preview_empty or not spec or current.prefab ~= spec.prefab then
+            if IsValid(current) then InClientWorld(current.Remove, current) end
+            current = spec and SpawnPreview(spec, self.inst.userid) or nil
+            current = current or EmptyPreview()
+            self.deploy_hint_markers[index] = current
         end
-        self.selection_preview_thread:SetList(nil)
-        self.selection_preview_thread = nil
+        -- 保留本体取标记的流程，再应用预制体原色及独立版外观设置
+        local result = Pack(old_GetDeployHintMarker(self, index, spacing, item, ...))
+        if result[1] and not current._aq_preview_empty then StylePreview(result[1], spec) end
+        return unpack(result, 1, result.n)
     end
+    queuer.HideUnusedDeployHintMarkers = function(self, count, ...)
+        -- 本次未使用的实体立即删除，不留在本体池中等待复用
+        for index, marker in pairs(self.deploy_hint_markers or {}) do
+            if index > count then
+                if IsValid(marker) then InClientWorld(marker.Remove, marker) end
+                self.deploy_hint_markers[index] = nil
+            end
+        end
+        return old_HideUnusedDeployHintMarkers(self, count, ...)
+    end
+    queuer.ClearDeployHint = function(self, remove, ...)
+        -- 整段清理在客户端标志下执行，子实体和 prefab 自带的移除回调由游戏负责
+        return InClientWorld(old_ClearDeployHint, self, true, ...)
+    end
+    return true
 end
 
-function ActionQueuerPreview:OnDown(rightclick) -- 按下
-    self:ClearSelectionPreviewThread() -- 清除旧框选线程
-    if self.inst:IsValid() and not IsHUDEntity() then
-        self:SelectionBox(rightclick)
+
+-- 兼容几何布局
+local owners = setmetatable({}, { __mode = "k" })
+local function GetGeometricSnap(queuer, deploy_fn, building)
+    local root
+    if building then
+        -- 建造坐标由几何布局包装的建造接口修正
+        local builder = queuer.inst.replica.builder
+        root = builder and builder.MakeRecipeAtPoint
+    elseif deploy_fn == queuer.DeployActiveItem then
+        -- 普通右键部署在发送 RPC 时修正坐标；以下物品遵守几何布局的原有豁免规则
+        local active = queuer.inst.replica.inventory:GetActiveItem()
+        for _, tag in ipairs({ "wallbuilder", "fencebuilder", "gatebuilder", "groundtile" }) do
+            if active and active:HasTag(tag) then return end
+        end
+        root = SendRPCToServer
     end
+    -- 丢弃、耕地等其他动作不经过上述路径，因此不额外套用几何布局坐标
+    if type(root) ~= "function" or not Upvaluehelper.FindUpvalue then return end
+    local owner = owners[root]
+    if owner == nil then
+        -- 按模组来源限定闭包，避免误取其他模组同名的 Snap；找不到时缓存 false
+        local _, _, found = Upvaluehelper.FindUpvalue(root, "Snap", "351325790")
+        owner = found or false
+        owners[root] = owner
+    end
+    if not owner then return end
+    -- 只缓存闭包归属，不缓存上值本身：切换网格会替换 Snap，菜单也能改变 CTRL
+    local snap = Upvaluehelper.GetUpvalue(owner, "Snap")
+    local ctrl = Upvaluehelper.GetUpvalue(owner, "CTRL")
+
+    if type(snap) == "function" and ctrl == TheInput:IsKeyDown(KEY_CTRL) then return snap end
 end
 
--- 初始化
-AddComponentPostInit("playercontroller", function(self, inst)
-    if inst ~= ThePlayer then return end
 
-    ActionQueuerPreview.inst = inst
-    -- 本模组设置/魔改部分
-    ActionQueuerPreview.preview_able = MOD_util:GetMOption("preview_able", true) -- 预览功能总开关
-    ActionQueuerPreview.preview_curs = {} -- 当前:存实体
-    ActionQueuerPreview.preview_eds = {} -- 已种：存true
-    ActionQueuerPreview.preview_highlight = MOD_util:GetMOption("preview_highlight", 0.3)
-    ActionQueuerPreview.preview_max = MOD_util:GetMOption("preview_max", 400) -- 预览最大数量
-    ActionQueuerPreview.preview_color = PLAYERCOLOURS[MOD_util:GetMOption("preview_color", "GREEN")] -- 颜色
-    ActionQueuerPreview.preview_dont_color = MOD_util:GetMOption("preview_dont_color", false) -- 不要变色
+-- 流程适配层：补充本体缺少的预览路径，包装接口而不替换动作执行器
+-- 挖地皮、浇水和铺地皮使用地块位置队列；DEPLOY 仅接入带 groundtile 标签的地皮
+local function PointAction(id, item)
+    return id == "TERRAFORM" or id == "POUR_WATER_GROUNDTILE"
+        or id == "DEPLOY" and item ~= nil and item:HasTag("groundtile")
+end
 
+-- 仅作为预览网格计算的动作占位，不执行实际部署
+local function DummyDeploy() end
 
-    TheInput:AddMoveHandler(function(x, y)
-        ActionQueuerPreview.queued_preview_movement = true
+local function TilePreviewPosition(pos)
+    -- 同一地皮内的点击位置和避障可达位置可能不同；这三种动作都以地皮为目标
+    -- 仅将显示位置归到地皮中心，再由 Paint 去重，不修改本体实际动作的坐标
+    return _G.Point(TheWorld.Map:GetTileCenterPoint(pos.x, 0, pos.z))
+end
+
+-- 拖动网格与执行队列使用相同顺序，物品不足时也显示同一组地块
+local function SortPointPreviews(points)
+    table.sort(points, function(a, b)
+        return a.pos.x < b.pos.x or a.pos.x == b.pos.x and a.pos.z < b.pos.z
     end)
+end
 
-    _ActionQueuer = Upvaluehelper.GetUpvalue(self.OnControl,"ActionQueuer")
-    farm_spacing = Upvaluehelper.GetUpvalue(_ActionQueuer.OnUp,"farm_spacing")
-    farm3x3_offset = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"farm3x3_offset")
-    GetHeadingDir = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"GetHeadingDir")
-    double_snake = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"double_snake")
-    GetAccessibleTilePosition = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"GetAccessibleTilePosition")
-    easy_stack = Upvaluehelper.GetUpvalue(_ActionQueuer.OnUp,"easy_stack")
-    mouse_controls = Upvaluehelper.FindUpvalue(self.OnControl, "mouse_controls", "workshop%-3136701076/modmain.lua")
-    default_aq_queuekey = Upvaluehelper.GetUpvalue(self.OnControl,"default_aq_queuekey")
-    IsHUDEntity = Upvaluehelper.GetUpvalue(_ActionQueuer.OnDown,"IsHUDEntity") -- HUD
+local function HeldItem(self)
+    local inv = self.inst.replica.inventory
+    return inv:GetActiveItem() or inv:GetEquippedItem(EQUIPSLOTS.HANDS)
+end
 
-    ActionQueuerPreview.userid = _ActionQueuer.inst.userid -- 自己的id
-    _ActionQueuer.CanDeployHint = function() -- 强行关闭原模组的预览功能
+-- 本体用 posaction 这个虚拟实体记录位置动作，读取它当前选中的动作类型
+local function SelectedPointAction(self)
+    local selected = self.posaction and self.selected_ents and self.selected_ents[self.posaction]
+    return selected and PointAction(selected.id, selected.item or HeldItem(self)) and selected.id or nil
+end
+
+-- 同时检查地块条件和本体可获取的动作，避免显示当前工具无法操作的点位
+local function CanPoint(self, id, pos, item)
+    if id == "DEPLOY" then
+        -- 物品耗尽时沿用本体查找下一组堆叠；传入实际物品检查动作，不移动物品
+        item = FindDeployHintItem(self, item)
+        local inventoryitem = item and item.replica and item.replica.inventoryitem
+        return inventoryitem and inventoryitem.CanDeploy and inventoryitem:CanDeploy(pos, nil, self.inst)
+            and not not self:GetAction(nil, id, nil, item, pos)
+    end
+    if id == "TERRAFORM" then
+        if not TheWorld.Map:CanTerraformAtPoint(pos.x, 0, pos.z) then return false end
+    elseif not TheWorld.Map:IsFarmableSoilAtPoint(pos.x, 0, pos.z) then
         return false
     end
+    return not not self:GetAction(nil, id, nil, nil, pos)
+end
 
-    if TheWorld and TheWorld.ismastersim then
-        Blacklist.wortox_soul = true -- 主机环境预览灵魂等于释放灵魂
+local function InstallHooks(queuer)
+    for _, name in ipairs({ "RefreshDeployHint", "ShowDeployHintMarker", "CanDeployHint",
+        "HideUnusedDeployHintMarkers", "DeployToSelection", "ClearActionThread",
+        "SelectEntity", "DeselectEntity", "selectallpos", "OnUp", "ClearDeployHint" }) do
+        if type(queuer[name]) ~= "function" then return false, "本体缺少预览适配接口：" .. name end
+    end
+    local old_OnUp = queuer.OnUp
+    local old_ClearDeployHint = queuer.ClearDeployHint
+    local old_RefreshDeployHint = queuer.RefreshDeployHint
+    local old_ShowDeployHintMarker = queuer.ShowDeployHintMarker
+    local old_CanDeployHint = queuer.CanDeployHint
+    local old_HideUnusedDeployHintMarkers = queuer.HideUnusedDeployHintMarkers
+    local old_DeployToSelection = queuer.DeployToSelection
+    local old_ClearActionThread = queuer.ClearActionThread
+    local old_SelectEntity = queuer.SelectEntity
+    local old_DeselectEntity = queuer.DeselectEntity
+    local old_selectallpos = queuer.selectallpos
+    -- 复用本体内部网格函数，使方向、间距及地皮起点的计算与本体一致
+    local grid = Upvaluehelper.GetUpvalue(old_RefreshDeployHint, "redir_valid_pos")
+    if type(grid) ~= "function" then return false, "无法取得本体的预览网格接口" end
+    local get_limit = Upvaluehelper.GetUpvalue(old_RefreshDeployHint, "GetDeployHintLimit")
+    if type(get_limit) ~= "function" then return false, "无法取得本体的预览数量接口" end
+    local deploy_spacing = Upvaluehelper.GetUpvalue(old_OnUp, "deploy_spacing")
+    local action_spacing = Upvaluehelper.GetUpvalue(old_OnUp, "action_spacing")
+    if type(deploy_spacing) ~= "table" or type(action_spacing) ~= "table" then
+        return false, "无法取得本体的位置动作间距"
+    end
+    -- 分别保存整批外观、位置动作信息、待刷新任务、本次收集点集和位置动作检查标志
+    local batch, point_context, pending, collecting, point_mode, handing_off
+
+    queuer.ClearDeployHint = function(self, remove, ...)
+        -- 松手时保留拖动预览，直到部署执行器或位置队列接管，避免整批实体被删除重建。
+        if handing_off and not remove then return end
+        return old_ClearDeployHint(self, remove, ...)
+    end
+    queuer.OnUp = function(self, rightclick, ...)
+        handing_off = self.clicked and not self.action_thread and (self.deploy_hint_count or 0) > 0
+            and not self:IsWalkButtonDown()
+            and (not next(self.selected_ents) or rightclick and SelectedPointAction(self))
+        local result = Pack(old_OnUp(self, rightclick, ...))
+        handing_off = nil
+        -- 没有开始执行（例如被移动键打断）时立即清理，避免保留失去接管者的预览
+        if not self.action_thread then self:ClearDeployHint(true) end
+        return unpack(result, 1, result.n)
     end
 
-    GLOBAL.setmetatable(ActionQueuerPreview, {
-        __index = function(t, k)
-            return GLOBAL.rawget(_ActionQueuer, k)
+    queuer.CanDeployHint = function(self, ...)
+        local result = Pack(old_CanDeployHint(self, ...))
+        -- 本体总开关关闭时返回 false，存在选中实体时返回 nil
+        -- 仅在选中实体只有位置动作占位实体时放行，仍遵守总开关及真实实体选择限制
+        if point_mode and result[1] == nil and self.selected_ents and self.posaction
+            and self.selected_ents[self.posaction] then
+            for ent in pairs(self.selected_ents) do if ent ~= self.posaction then return unpack(result, 1, result.n) end end
+            return true
         end
-    })
+        return unpack(result, 1, result.n)
+    end
 
-    local PlayerControllerOnControl = self.OnControl
-    self.OnControl = function(self, control, down)
-        -- 左键false，右键true
-        local mouse_control = mouse_controls[control]
-        if mouse_control ~= nil then
-            if down then
-                if TheInput:IsKeyDown(MOD_util:GetMOption("aq_queuekey", default_aq_queuekey))
-                    and not TheInput:IsControlPressed(CONTROL_FORCE_INSPECT) then
-                    ActionQueuerPreview:OnDown(mouse_control)
-                end
-            else
-                ActionQueuerPreview:ClearSelectionPreviewThread() -- 清除框选线程
+    queuer.ShowDeployHintMarker = function(self, index, pos, spacing, item, ...)
+        if collecting then
+            -- 本体循环复用同一个坐标对象，必须复制后保存，否则全部预览都会落到最后一点
+            collecting[#collecting + 1] = { pos = Point(pos.x, 0, pos.z), spacing = spacing, item = item }
+            return
+        end
+        return old_ShowDeployHintMarker(self, index, pos, spacing, item, ...)
+    end
+    queuer.HideUnusedDeployHintMarkers = function(self, count, ...)
+        -- 收集期间先不隐藏，待坐标修正及去重后，用实际绘制数量统一收尾
+        if not collecting then return old_HideUnusedDeployHintMarkers(self, count, ...) end
+    end
+
+    -- 对本体给出的点集做显示坐标修正、去重和额外筛选，再用连续索引绘制到本体池中
+    local function Paint(self, points, spec, snap, filter, limit)
+        local seen, count = {}, 0
+        -- 只索引上一帧仍显示的实体；按坐标重新排入本体池，索引变化不会重播动画。
+        local previous = {}
+        self.deploy_hint_markers = self.deploy_hint_markers or {}
+        for index, marker in pairs(self.deploy_hint_markers) do
+            previous[marker._aq_preview_pos or marker] = marker
+            self.deploy_hint_markers[index] = nil
+        end
+        -- 向外观层传递本次外观；即使 spec 为空，也不临时改取其他物品的外观
+        self._aq_preview_draw = { spec = spec }
+        for _, entry in ipairs(points) do
+            -- 位置队列也遵守本体的物品总量限制；去重后再计数，避免偏移点占用名额
+            if limit and count >= limit then break end
+            -- 本体还用原坐标记录已处理点位，因此只能修正显示坐标，不能原地改动
+            local pos = snap and snap(entry.pos) or entry.pos
+            local key = string.format("%.6f:%.6f", pos.x, pos.z)
+            if not seen[key] and (not filter or filter(pos)) then
+                seen[key] = true
+                count = count + 1
+                self.deploy_hint_markers[count] = previous[key]
+                previous[key] = nil
+                old_ShowDeployHintMarker(self, count, pos, entry.spacing, entry.item)
+                self.deploy_hint_markers[count]._aq_preview_pos = key
+                -- 与当前本体标记数量上限一致，避免生成过多真实预览实体
+                if count >= 400 then break end
             end
         end
-
-        return PlayerControllerOnControl(self, control, down) -- 该干啥干啥
+        self._aq_preview_draw = nil
+        -- 离开本次点集的实体立即删除，不保留隐藏缓存。
+        for _, marker in pairs(previous) do
+            if IsValid(marker) then InClientWorld(marker.Remove, marker) end
+        end
+        old_HideUnusedDeployHintMarkers(self, count)
     end
 
-    local old_ActionQueuer_ClearSelectedEntities = _ActionQueuer.ClearSelectedEntities
-    _ActionQueuer.ClearSelectedEntities = function(...)
-        ActionQueuerPreview:ClearPreview()
-        old_ActionQueuer_ClearSelectedEntities(...)
-    end
-
-    local old_ActionQueuer_ClearActionThread = _ActionQueuer.ClearActionThread
-    _ActionQueuer.ClearActionThread = function(...)
-        ActionQueuerPreview:ClearPreview()
-        old_ActionQueuer_ClearActionThread(...)
-    end
-
-    -- 还得是覆盖法...
-    local redir_valid_pos = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"redir_valid_pos")
-    local GetDeployHintLimit = Upvaluehelper.GetUpvalue(_ActionQueuer.DeployToSelection,"GetDeployHintLimit")
-    function _ActionQueuer:DeployToSelection(deploy_fn, spacing, item, preview_mode)
-        if not self.TL then return end
-        self:MovementPredict()
-        -- 210116 null: cases for snapping positions to farm grid (Tilling, Wormwood planting on soil tiles, etc)
-        --[[local snap_farm = false
-        if deploy_fn == self.TillAtPoint or deploy_fn == self.WormwoodPlantAtPoint then snap_farm = true end
-    ]]
-        local data = redir_valid_pos(self, deploy_fn, spacing, item)
-        local deploy_hint_limit = GetDeployHintLimit(self, deploy_fn, item)
-        self:RefreshDeployHint(deploy_fn, spacing, item, nil, data, deploy_hint_limit)
-        local height = data.height
-        local start_x = data.start_x
-        local start_z = data.start_z
-        local terraforming = data.terraforming
-        local width = data.width
-        local spacing_x = data.spacing_x
-        local spacing_z = data.spacing_z
-        local X, Z = data.X, data.Z
-        local diagonal = data.diagonal
-
-        local cur_pos = Point()
-        local count = { x = 0, y = 0, z = 0 }
-        local row_swap = 1
-
-        -- 210127 null: added support for snaking within snaking for faster deployment (thanks to blizstorm)
-        local step = 1
-        local countz2 = 0
-        local countStep = { { 0, 1 }, { 1, 0 }, { 0, -1 }, { 1, 0 } }
-        if height < 1 then countStep = { { 1, 0 }, { 1, 0 }, { 1, 0 }, { 1, 0 } } end -- 210130 null: bliz fix (210127)
-        local deployed_pos = {}
-        self.action_thread = StartThread(function()
-            self.inst:ClearBufferedAction()
-
-            while self.inst:IsValid() do
-                cur_pos.x = start_x + spacing_x * count.x
-                cur_pos.z = start_z + spacing_z * count.z
-                if diagonal then
-                    if width < 1 then
-                        if count[Z] > height then break end
-                        count[X] = count[X] - 1
-                        count[Z] = count[Z] + 1
-                    else
-                        local row = math.floor(count.y / 2)
-                        if count[X] + row > width or count[X] + row < 0 then
-                            count.y = count.y + 1
-                            if count.y > height then break end
-                            row_swap = -row_swap
-                            count[X] = count[X] + row_swap - 1
-                            count[Z] = count[Z] + row_swap
-                            cur_pos.x = start_x + spacing_x * count.x
-                            cur_pos.z = start_z + spacing_z * count.z
-                        end
-                        count.x = count.x + row_swap
-                        count.z = count.z + row_swap
-                    end
-                else
-                    if double_snake then -- 210127 null: snake within snake deployment (thanks to blizstorm)
-                        if count[X] > width or count[X] < 0 then
-                            countz2 = countz2 +
-                                2 -- assume first that next major row can be progressed since this is the case most of the time (blizstorm)
-
-                            -- if countz2 > height then -- old bliz code (210115)
-                            if countz2 + 1 > height then -- 210130 null: bliz fix (210127)
-                                -- if countz2 - 1 > height then -- old bliz code (210115)
-                                -- if countz2 - 1 <= height then -- old bliz code (210122)
-                                if countz2 <= height then -- 210130 null: bliz fix (210127)
-                                    -- countz2 = countz2 - 1 -- old bliz code (210115)
-                                    countStep = { { 1, 0 }, { 1, 0 }, { 1, 0 }, { 1, 0 } }
-                                else
-                                    break
-                                end
-                            end
-
-                            step = 1
-                            row_swap = -row_swap
-                            count[X] = count[X] + row_swap
-                            count[Z] = countz2
-                            cur_pos.x = start_x + spacing_x * count.x
-                            cur_pos.z = start_z + spacing_z * count.z
-                        end
-                        count[X] = count[X] + countStep[step][1] * row_swap
-                        count[Z] = count[Z] + countStep[step][2]
-                        step = step % 4 + 1
-                    else -- Regular snaking deployment
-                        if count[X] > width or count[X] < 0 then
-                            count[Z] = count[Z] + 1
-                            if count[Z] > height then break end
-                            row_swap = -row_swap
-                            count[X] = count[X] + row_swap
-                            cur_pos.x = start_x + spacing_x * count.x
-                            cur_pos.z = start_z + spacing_z * count.z
-                        end
-                        count[X] = count[X] + row_swap
-                    end
+    queuer.RefreshDeployHint = function(self, deploy_fn, spacing, item, ...)
+        -- 本体不会为位置动作传入部署函数；拖动中从选中的占位实体补出动作信息
+        local id = not deploy_fn and self.clicked and self.TL and SelectedPointAction(self)
+        local extra = Pack(...)
+        local spec, snap, filter, limit
+        if id then
+            local selected = self.selected_ents[self.posaction]
+            local active = self.inst.replica.inventory:GetActiveItem()
+            spacing = active and deploy_spacing[active.prefab] or action_spacing[id] or 2
+            item = FindDeployHintItem(self, selected.item or HeldItem(self))
+            if not item then return self:ClearDeployHint() end
+            spec = GetSpec(self, item)
+            -- 借用挖地皮分支计算地皮起点和可达位置，再由各动作自己的条件筛选
+            extra = Pack(nil, grid(self, self.TerraformAtPoint, spacing, item))
+            -- 先收集网格点，再按地块去重和检查动作；重复点不能提前占用物品数量名额
+            deploy_fn = DummyDeploy
+            limit = id == "DEPLOY" and get_limit(self, self.DeployActiveItem, item) or nil
+            snap = TilePreviewPosition
+            filter = function(pos) return CanPoint(self, id, pos, item) end
+            point_mode = true
+        else
+            -- 执行中使用整批外观快照，拖动阶段则读取当前物品或建筑虚影
+            local current = batch and batch.deploy_fn == deploy_fn and batch or nil
+            if current then spec = current.spec else spec = GetSpec(self, item) end
+            local pc = self.inst.components.playercontroller
+            local recipe = current and current.recipe or (item == nil and pc.placer_recipe)
+            snap = GetGeometricSnap(self, deploy_fn, recipe ~= nil and recipe ~= false)
+            if recipe then
+                -- 建造首个建筑后当前配方可能被清空，继续用批次保存的配方检查剩余点位
+                local rotation = current and current.rotation or (pc.placer and pc.placer:GetRotation() or 0)
+                filter = function(pos)
+                    local builder = self.inst.replica.builder
+                    return builder and (builder:IsBuildBuffered(recipe.name) or builder:CanBuild(recipe.name))
+                        and builder:CanBuildAtPoint(pos, recipe, rotation)
                 end
-
-                local accessible_pos = cur_pos
-                if terraforming then
-                    accessible_pos = GetAccessibleTilePosition(cur_pos)
-                elseif deploy_fn == self.TillAtPoint then -- 210117 null: check if pos already Tilled
-                    for _, ent in pairs(TheSim:FindEntities(cur_pos.x, 0, cur_pos.z, 0.005, { "soil" })) do
-                        if not ent:HasTag("NOCLICK") then
-                            accessible_pos = false
-                            break
-                        end -- Skip Tilling this position
-                    end
-                elseif ThePlayer.replica.inventory and -- 额外部分
-                    ThePlayer.replica.inventory:GetActiveItem() and
-                    ThePlayer.replica.inventory:GetActiveItem().replica and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem.CanDeploy and
-                    ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem:IsDeployable(self.inst) and  -- 鼠标拿着物品&是可以部署的
-                    not ( -- 不满足可以放置在此点位的要求
-                        ThePlayer.replica.inventory:GetActiveItem().replica.inventoryitem:CanDeploy(
-                            accessible_pos and gp_mod_Snap and gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and gp_mod_Snap(cur_pos) or cur_pos, -- 兼容几何布局校准后的点位
-                            nil, ThePlayer,
-                            ThePlayer.components.playercontroller and ThePlayer.components.playercontroller.placer and ThePlayer.components.playercontroller.placer:GetRotation() or nil)
-                    )
-                    or ThePlayer.components.playercontroller and ThePlayer.components.playercontroller.placer and ThePlayer.components.playercontroller.placer_recipe and not -- 鼠标上打包的建筑是否可以放置
-                        TheWorld.Map:CanDeployRecipeAtPoint(
-                            accessible_pos and gp_mod_Snap and gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and gp_mod_Snap(cur_pos) or cur_pos, -- 兼容几何布局校准后的点位
-                            ThePlayer.components.playercontroller.placer_recipe,
-                            ThePlayer.components.playercontroller.placer:GetRotation(),
-                            ThePlayer
-                    )
-                then
-                    accessible_pos = false
-                end
-
-                if accessible_pos and gp_mod_Snap and not (deploy_fn == self.DropActiveItem) then -- 如果获取到几何布局的对齐网格点函数 and 当前不为丢弃物品操作
-                    if gp_mod_CTRL_setting() == TheInput:IsKeyDown(KEY_CTRL) and not snap_farm then -- 启用网格对齐&不在耕地状态(耕地的点位对齐不符合要求)
-                        accessible_pos = gp_mod_Snap(accessible_pos)
-                    end
-                end
-
-                --if preview_mode then
-                if accessible_pos then
-                    deployed_pos[accessible_pos.x .. "p" .. accessible_pos.z] = true
-                    if not deploy_fn(self, accessible_pos, item) then
-                        break
-                    else
-                        ActionQueuerPreview:RemovePreview(accessible_pos)
-                    end
-                end
-                self:RefreshDeployHint(deploy_fn, spacing, item, deployed_pos, data, deploy_hint_limit)
             end
-            self:ClearActionThread(next(self.selected_ents))
-            self.inst:DoTaskInTime(0, function() if next(self.selected_ents) then self:ApplyToSelection() end end)
-        end, "actionqueue_action_thread")
+        end
+        -- 先让原刷新函数完成网格遍历与数量限制，仅截取绘制调用；之后再统一绘制
+        local points = {}
+        collecting = points
+        local result = Pack(old_RefreshDeployHint(self, deploy_fn, spacing, item, unpack(extra, 1, extra.n)))
+        collecting, point_mode = nil, nil
+        if id then SortPointPreviews(points) end
+        Paint(self, points, spec, snap, filter, limit)
+        return unpack(result, 1, result.n)
     end
+
+    queuer.DeployToSelection = function(self, deploy_fn, spacing, item, ...)
+        local pc = self.inst.components.playercontroller
+        batch = { deploy_fn = deploy_fn, spec = GetSpec(self, item),
+            recipe = item == nil and pc.placer_recipe or nil,
+            rotation = pc.placer and pc.placer:GetRotation() or 0 }
+        -- 游戏在首个建筑完成后会清空 pc.placer；整批保留预制体、皮肤、配方和旋转，
+        -- 直到本体结束或中断动作，避免后续预览丢失建筑外观
+        return old_DeployToSelection(self, deploy_fn, spacing, item, ...)
+    end
+
+    local function RefreshPointQueue(self)
+        -- 拖动阶段由框选刷新负责；动作已停止时只能清理，不能让延迟任务重新显示预览
+        if self.clicked or not point_context then return end
+        if not self.action_thread then return self:ClearDeployHint() end
+        local id, item = point_context.id, point_context.item
+        point_mode = true
+        local allowed = self:CanDeployHint()
+        point_mode = nil
+        if not allowed then return self:ClearDeployHint() end
+        -- 本体会重置并替换整个队列表，必须每次重新读取上值，不能缓存旧表
+        local queue = Upvaluehelper.GetUpvalue(old_selectallpos, "posaction_postab")
+        local points = {}
+        for pos, action in pairs(queue or {}) do
+            if action == id and CanPoint(self, id, TilePreviewPosition(pos), item) then
+                points[#points + 1] = { pos = pos, spacing = 4, item = item }
+            end
+        end
+        -- 队列表的遍历顺序不固定，排序后按稳定顺序重建本次预览
+        SortPointPreviews(points)
+        local limit = id == "DEPLOY" and get_limit(self, self.DeployActiveItem, item) or nil
+        Paint(self, points, point_context.spec, TilePreviewPosition, nil, limit)
+    end
+    local function Schedule(self)
+        -- 合并同一帧的选中、取消选中通知，下一帧再读取本体更新完成后的剩余队列
+        if pending or not point_context then return end
+        pending = self.inst:DoTaskInTime(FRAMES, function()
+            pending = nil
+            if self.inst:IsValid() then RefreshPointQueue(self) end
+        end)
+    end
+    queuer.selectallpos = function(self, id, spacing, item, ...)
+        -- 本体启动位置框选队列后安排一次刷新，不另建持续运行的预览线程
+        if PointAction(id, item) then
+            point_context = { id = id, item = item, spec = GetSpec(self, item) }
+        end
+        local result = Pack(old_selectallpos(self, id, spacing, item, ...))
+        Schedule(self)
+        return unpack(result, 1, result.n)
+    end
+    queuer.SelectEntity = function(self, ent, id, item, ...)
+        -- 位置动作每次重选目标都会经过这里，借此刷新剩余点位及当前工具外观
+        local result = Pack(old_SelectEntity(self, ent, id, item, ...))
+        item = item or HeldItem(self)
+        if ent == self.posaction and PointAction(id, item) then
+            point_context = { id = id, item = item, spec = GetSpec(self, item) }
+            Schedule(self)
+        end
+        return unpack(result, 1, result.n)
+    end
+    queuer.DeselectEntity = function(self, ent, ...)
+        -- 最后一个点执行完可能不再重选目标，取消选中时也要通知刷新以隐藏旧标记
+        local result = Pack(old_DeselectEntity(self, ent, ...))
+        if ent == self.posaction then Schedule(self) end
+        return unpack(result, 1, result.n)
+    end
+    local function Reset()
+        -- 取消待执行的刷新，并丢弃批次信息，防止上一批预览影响下一批动作
+        if pending then pending:Cancel(); pending = nil end
+        batch, point_context, handing_off = nil, nil, nil
+    end
+    queuer.ClearActionThread = function(self, ...)
+        Reset()
+        return old_ClearActionThread(self, ...)
+    end
+    queuer.inst:ListenForEvent("onremove", function()
+        -- 玩家实体移除时一并清理，避免退出世界或更换实体后留下任务和预览实体
+        Reset()
+        queuer:ClearDeployHint(true)
+    end)
+    return true
+end
+
+
+AddComponentPostInit("playercontroller", function(controller, inst)
+    if inst ~= ThePlayer then return end
+    inst:DoTaskInTime(0, function()
+        local queuer = Upvaluehelper.GetUpvalue(controller.OnControl, "ActionQueuer")
+        local installed, reason = InstallVisuals(queuer)
+        if not installed then
+            print("[黑化排队论 · 动作预览] " .. reason)
+            return
+        end
+        local adapted, detail = InstallHooks(queuer)
+        if not adapted then
+            print("[黑化排队论 · 动作预览] " .. detail)
+        end
+    end)
 end)
 
---------------------模组设置界面-------------------
-if not MOD_util:CanAddSetting() then
-    return
-end
-local pagename = "排队论预览"
-local pageorder = 1
-local buttonname = pagename
-local pagetitle = "黑化排队论 · 动作预览设置"
+if not MOD_util:CanAddSetting() then return end
 local enabledisableoption = { { text = "禁用", data = false }, { text = "启用", data = true } }
-MOD_util:CreatePage(pagename, {
-    title = pagetitle,
-    buttondata = { name = buttonname },
-    order = pageorder,
+MOD_util:CreatePage("排队论预览", {
+    title = "黑化排队论 · 预览外观设置",
+    buttondata = { name = "排队论预览" },
+    order = 1,
     all_options = {
         {
-            description = "预览功能", -- 名称
-            key = "preview_able", -- 对应设置项
-            default = true, -- 默认选项
-            options = enabledisableoption, -- 选项列表
-            onapplyfn = function()
-                ActionQueuerPreview.preview_able = MOD_util:GetMOption("preview_able", true)
-            end
+            description = "预览亮度",
+            key = "preview_highlight",
+            default = 0.3,
+            options = {
+                { text = "10%", data = 0.1 }, { text = "20%", data = 0.2 },
+                { text = "30%", data = 0.3 }, { text = "40%", data = 0.4 },
+                { text = "50%", data = 0.5 }, { text = "60%", data = 0.6 },
+                { text = "70%", data = 0.7 }, { text = "80%", data = 0.8 },
+                { text = "90%", data = 0.9 }, { text = "100%", data = 1 },
+            },
         },
         {
-            description = "预览数量", -- 名称
-            key = "preview_max", -- 对应设置项
-            default = 400, -- 默认选项
+            description = "预览颜色",
+            key = "preview_color",
+            default = "GREEN",
             options = {
-                {text = "80", data = 80},
-                {text = "100", data = 100},
-                {text = "120", data = 120},
-                {text = "160", data = 160},
-                {text = "200", data = 200},
-                {text = "250", data = 250},
-                {text = "300", data = 300},
-                {text = "400", data = 400},
-                {text = "500", data = 500},
-                {text = "1000", data = 1000},
-                {text = "2000", data = 2000},
-                {text = "3000", data = 3000},
-                {text = "4000", data = 4000},
-                {text = "5000", data = 5000},
-                {text = "9999", data = 9999},
+                { text = "白色", data = "WHITE" }, { text = "红色", data = "FIREBRICK" },
+                { text = "橙色", data = "TAN" }, { text = "黄色", data = "LIGHTGOLD" },
+                { text = "绿色", data = "GREEN" }, { text = "青色", data = "TEAL" },
+                { text = "蓝色", data = "OTHERBLUE" }, { text = "紫色", data = "DARKPLUM" },
+                { text = "粉色", data = "ROSYBROWN" }, { text = "金色", data = "GOLDENROD" },
             },
-            onapplyfn = function()
-                ActionQueuerPreview.preview_max = MOD_util:GetMOption("preview_max", true)
-            end
         },
         {
-            description = "预览亮度", -- 名称
-            key = "preview_highlight", -- 对应设置项
-            default = 0.3, -- 默认选项
-            options = {
-                {text = "10%", data = 0.1},
-                {text = "20%", data = 0.2},
-                {text = "30%", data = 0.3},
-                {text = "40%", data = 0.4},
-                {text = "50%", data = 0.5},
-                {text = "60%", data = 0.6},
-                {text = "70%", data = 0.7},
-                {text = "80%", data = 0.8},
-                {text = "90%", data = 0.9},
-                {text = "100%", data = 1},
-            },
-            onapplyfn = function()
-                ActionQueuerPreview.preview_highlight = MOD_util:GetMOption("preview_highlight", true)
-            end
+            description = "保留原色",
+            key = "preview_dont_color",
+            default = false,
+            options = enabledisableoption,
         },
-        {
-            description = "预览颜色", -- 名称
-            key = "preview_color", -- 对应设置项
-            default = "GREEN", -- 默认选项
-            options = {
-                {text = "白色", data = "WHITE"},
-                {text = "红色", data = "FIREBRICK"},
-                {text = "橙色", data = "TAN"},
-                {text = "黄色", data = "LIGHTGOLD"},
-                {text = "绿色", data = "GREEN"},
-                {text = "青色", data = "TEAL"},
-                {text = "蓝色", data = "OTHERBLUE"},
-                {text = "紫色", data = "DARKPLUM"},
-                {text = "粉色", data = "ROSYBROWN"},
-                {text = "金色", data = "GOLDENROD"},
-            },
-            onapplyfn = function()
-                ActionQueuerPreview.preview_color = PLAYERCOLOURS[MOD_util:GetMOption("preview_color", true)]
-            end
-        },
-        {
-            description = "禁用颜色", -- 名称
-            key = "preview_dont_color", -- 对应设置项
-            default = false, -- 默认选项
-            options = {
-                {text = "是", data = true},
-                {text = "否", data = false},
-            },
-            onapplyfn = function()
-                ActionQueuerPreview.preview_dont_color = MOD_util:GetMOption("preview_dont_color", true)
-            end
-        },
-    }
-}
-)
+    },
+})
