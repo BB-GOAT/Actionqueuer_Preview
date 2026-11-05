@@ -263,7 +263,7 @@ local function InstallVisuals(queuer)
         local spec = drawing and drawing.spec or (not drawing and GetSpec(self, item))
         self.deploy_hint_markers = self.deploy_hint_markers or {}
         local current = self.deploy_hint_markers[index]
-        -- Paint 已按坐标对应旧实体；这里只比较 prefab 名称，其他外观变化直接更新。
+        -- Paint 已按坐标对应旧实体；这里只比较 prefab 名称，其他外观变化直接更新
         if not IsValid(current) or current._aq_preview_empty or not spec or current.prefab ~= spec.prefab then
             if IsValid(current) then InClientWorld(current.Remove, current) end
             current = spec and SpawnPreview(spec, self.inst.userid) or nil
@@ -405,12 +405,17 @@ local function InstallHooks(queuer)
     if type(deploy_spacing) ~= "table" or type(action_spacing) ~= "table" then
         return false, "无法取得本体的位置动作间距"
     end
+    if type(Upvaluehelper.GetUpvalue(old_RefreshDeployHint, "MAX_DEPLOY_HINT_MARKERS")) ~= "number" then
+        return false, "无法调整本体的预览数量上限"
+    end
+    local last_size -- 同一次拖动只在尺寸变化时说话，结束后重置
     -- 分别保存整批外观、位置动作信息、待刷新任务、本次收集点集和位置动作检查标志
     local batch, point_context, pending, collecting, point_mode, handing_off
 
     queuer.ClearDeployHint = function(self, remove, ...)
-        -- 松手时保留拖动预览，直到部署执行器或位置队列接管，避免整批实体被删除重建。
+        -- 松手时保留拖动预览，直到部署执行器或位置队列接管，避免整批实体被删除重建
         if handing_off and not remove then return end
+        last_size = nil
         return old_ClearDeployHint(self, remove, ...)
     end
     queuer.OnUp = function(self, rightclick, ...)
@@ -418,7 +423,7 @@ local function InstallHooks(queuer)
             and not self:IsWalkButtonDown()
             and (not next(self.selected_ents) or rightclick and SelectedPointAction(self))
         local result = Pack(old_OnUp(self, rightclick, ...))
-        handing_off = nil
+        handing_off, last_size = nil, nil
         -- 没有开始执行（例如被移动键打断）时立即清理，避免保留失去接管者的预览
         if not self.action_thread then self:ClearDeployHint(true) end
         return unpack(result, 1, result.n)
@@ -452,7 +457,8 @@ local function InstallHooks(queuer)
     -- 对本体给出的点集做显示坐标修正、去重和额外筛选，再用连续索引绘制到本体池中
     local function Paint(self, points, spec, snap, filter, limit)
         local seen, count = {}, 0
-        -- 只索引上一帧仍显示的实体；按坐标重新排入本体池，索引变化不会重播动画。
+        limit = math.min(limit or math.huge, GetOption("preview_max", 400))
+        -- 只索引上一帧仍显示的实体；按坐标重新排入本体池，索引变化不会重播动画
         local previous = {}
         self.deploy_hint_markers = self.deploy_hint_markers or {}
         for index, marker in pairs(self.deploy_hint_markers) do
@@ -474,12 +480,10 @@ local function InstallHooks(queuer)
                 previous[key] = nil
                 old_ShowDeployHintMarker(self, count, pos, entry.spacing, entry.item)
                 self.deploy_hint_markers[count]._aq_preview_pos = key
-                -- 与当前本体标记数量上限一致，避免生成过多真实预览实体
-                if count >= 400 then break end
             end
         end
         self._aq_preview_draw = nil
-        -- 离开本次点集的实体立即删除，不保留隐藏缓存。
+        -- 离开本次点集的实体立即删除，不保留隐藏缓存
         for _, marker in pairs(previous) do
             if IsValid(marker) then InClientWorld(marker.Remove, marker) end
         end
@@ -490,6 +494,16 @@ local function InstallHooks(queuer)
         -- 本体不会为位置动作传入部署函数；拖动中从选中的占位实体补出动作信息
         local id = not deploy_fn and self.clicked and self.TL and SelectedPointAction(self)
         local extra = Pack(...)
+        if extra[1] then
+            -- 本体记录的是已尝试点位，遮挡后跳过也会计数，不能据此扣减剩余物品数量
+            -- 改用本体统计的当前库存，并抵消原刷新函数随后对已尝试点位的扣减
+            local remaining = get_limit(self, deploy_fn, item)
+            if remaining then
+                for _ in pairs(extra[1]) do remaining = remaining + 1 end
+                extra[3] = remaining
+                extra.n = math.max(extra.n, 3)
+            end
+        end
         local spec, snap, filter, limit
         if id then
             local selected = self.selected_ents[self.posaction]
@@ -523,10 +537,25 @@ local function InstallHooks(queuer)
                 end
             end
         end
+        if self.clicked and deploy_fn and self.TL and spacing and self:CanDeployHint() then
+            -- 复用本体网格的行列数；不受遮挡、物品数量或预览数量限制影响
+            local data = extra[2] or grid(self, deploy_fn, spacing, item)
+            extra[2], extra.n = data, math.max(extra.n, 2)
+            local size = (data.width + 1) .. "×" .. (data.height + 1)
+            local talker = self.inst.components.talker
+            if talker and size ~= last_size then
+                talker:Say(size)
+                last_size = size
+            end
+        end
         -- 先让原刷新函数完成网格遍历与数量限制，仅截取绘制调用；之后再统一绘制
         local points = {}
         collecting = points
+        -- 本体另有 400 的硬上限；只在本次同步收集期间使用设置值，结束后恢复
+        local old_MAX_DEPLOY_HINT_MARKERS = Upvaluehelper.GetUpvalue(old_RefreshDeployHint, "MAX_DEPLOY_HINT_MARKERS")
+        Upvaluehelper.SetUpvalue(old_RefreshDeployHint, GetOption("preview_max", 400), "MAX_DEPLOY_HINT_MARKERS")
         local result = Pack(old_RefreshDeployHint(self, deploy_fn, spacing, item, unpack(extra, 1, extra.n)))
+        Upvaluehelper.SetUpvalue(old_RefreshDeployHint, old_MAX_DEPLOY_HINT_MARKERS, "MAX_DEPLOY_HINT_MARKERS")
         collecting, point_mode = nil, nil
         if id then SortPointPreviews(points) end
         Paint(self, points, spec, snap, filter, limit)
@@ -639,6 +668,21 @@ MOD_util:CreatePage("排队论预览", {
     buttondata = { name = "排队论预览" },
     order = 1,
     all_options = {
+        {
+            description = "预览数量",
+            key = "preview_max",
+            default = 400,
+            options = {
+                { text = "80", data = 80 }, { text = "100", data = 100 },
+                { text = "120", data = 120 }, { text = "160", data = 160 },
+                { text = "200", data = 200 }, { text = "250", data = 250 },
+                { text = "300", data = 300 }, { text = "400", data = 400 },
+                { text = "500", data = 500 }, { text = "1000", data = 1000 },
+                { text = "2000", data = 2000 }, { text = "3000", data = 3000 },
+                { text = "4000", data = 4000 }, { text = "5000", data = 5000 },
+                { text = "9999", data = 9999 },
+            },
+        },
         {
             description = "预览亮度",
             key = "preview_highlight",
