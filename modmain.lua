@@ -3036,6 +3036,11 @@ local function CanDeployHintAtPoint(self, deploy_fn, pos, item)
 end
 
 local function redir_valid_pos(self, deploy_fn, spacing, item)
+	--防止spacing为0/负/NaN（如min_spacing=0的配方：温蒂墓碑wendy_gravestone、月亮装置moon_device_construction1）
+	--除以0算出的width/height为inf/nan时，网格循环的break条件永远不成立，会无Sleep死循环导致游戏未响应
+	if spacing == nil or spacing ~= spacing or spacing <= 0 then
+		spacing = 1
+	end
 	local snap_farm = false
 	if deploy_fn == self.TillAtPoint or deploy_fn == self.WormwoodPlantAtPoint then snap_farm = true end
 	local heading, dir = GetHeadingDir()
@@ -3307,6 +3312,7 @@ function ActionQueuer:SelectionBox(rightclick)
 				local recipe = playercontroller.placer_recipe
 				deploy_fn = null
 				spacing = recipe.min_spacing or 3.2
+				if spacing <= 0 then spacing = 1 end --min_spacing=0的配方不能当网格间距用，会除0死循环
 				item = nil
 			end
 			self:RefreshDeployHint(deploy_fn, spacing, item)
@@ -3625,7 +3631,14 @@ function ActionQueuer:OnUp(rightclick) -- 抬起
 				local skin = playercontroller.placer_recipe_skin
 				local builder = self.inst.replica.builder
 				local spacing = recipe.min_spacing or 3.2
+				if spacing <= 0 then spacing = 1 end --min_spacing=0的配方（如温蒂墓碑）不能当网格间距用，会除0死循环
 				self:DeployToSelection(function(self, pos, item)
+					--若上一座建筑弹出的写字界面（如温蒂墓碑的墓志铭输入框）还没关闭，先等玩家关闭再继续
+					--HUD 的 writeablescreen 是单槽位：连续弹框会用新框覆盖旧框引用，旧输入框将永远无法关闭
+					while self.inst:IsValid() and ThePlayer ~= nil and ThePlayer.HUD ~= nil
+						and ThePlayer.HUD.writeablescreen ~= nil do
+						Sleep(FRAMES)
+					end
 					if not builder:IsBuildBuffered(recipe.name) then
 						if not builder:CanBuild(recipe.name) then return false end
 						builder:BufferBuild(recipe.name)
@@ -3633,6 +3646,11 @@ function ActionQueuer:OnUp(rightclick) -- 抬起
 					if builder:CanBuildAtPoint(pos, recipe, rotation) then
 						builder:MakeRecipeAtPoint(recipe, pos, rotation, skin)
 						self:Wait()
+						--建造后弹出了写字界面（墓碑墓志铭）时，等玩家写完关闭再继续下一座，避免输入框叠加
+						while self.inst:IsValid() and ThePlayer ~= nil and ThePlayer.HUD ~= nil
+							and ThePlayer.HUD.writeablescreen ~= nil do
+							Sleep(FRAMES)
+						end
 					end
 					return true
 				end, spacing)
