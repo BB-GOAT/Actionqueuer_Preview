@@ -26,10 +26,10 @@ dont_starve_compatible = false
 reign_of_giants_compatible = false
 shipwrecked_compatible = false
 
-icon_atlas = "icn.xml"
-icon = "icn.tex"
+icon_atlas = "modicon.xml"
+icon = "modicon.tex"
 
-version = "2.2.22"
+version = "2.2.23"
 server_filter_tags = {}
 local null_options = {
 	{ description = "", data = 0 }

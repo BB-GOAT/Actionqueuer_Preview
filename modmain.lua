@@ -4082,7 +4082,7 @@ function ActionQueuer:ApplyToSelection(notclearbuffer)
 						local active = ThePlayer.replica.inventory:GetActiveItem()
 						local function checkitem(inst)
 							if update_item and inst.prefab == update_item.prefab and (not acttab.selectitemfn or acttab.selectitemfn(inst))
-								or (acttab.selectitemfn_force and acttab.selectitemfn_force({ item = inst, oldprefab = update_item.prefab })) then
+								or (acttab.selectitemfn_force and acttab.selectitemfn_force({ item = inst, oldprefab = update_item and update_item.prefab })) then
 								return true
 							end
 						end
@@ -4161,7 +4161,7 @@ function ActionQueuer:ApplyToSelection(notclearbuffer)
 							local active = INV_util:GetActiveItem()
 							local a, b, c = INV_util:FindInInventory(nil, nil, function(inst)
 								if inst.prefab == oldactive_item.prefab and (not acttab.selectitemfn or acttab.selectitemfn(inst))
-									or (acttab.selectitemfn_force and acttab.selectitemfn_force({ item = inst, oldprefab = oldactive_item.prefab })) then
+									or (acttab.selectitemfn_force and acttab.selectitemfn_force({ item = inst, oldprefab = oldactive_item and oldactive_item.prefab })) then
 									return true
 								end
 							end)
