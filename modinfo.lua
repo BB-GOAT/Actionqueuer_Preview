@@ -13,7 +13,7 @@ description = [[
 3.配合另一个点击切装备食用更佳。
 4.线程开启的时候自动关闭延迟补偿，结束后自动开启。
 5.薇诺娜可以用shift右键快速转化花朵
-6.可与预览部署的物品
+6.可以预览部署的物品
 ]]
 forumthread = ""
 api_version = 10
@@ -29,7 +29,7 @@ shipwrecked_compatible = false
 icon_atlas = "modicon.xml"
 icon = "modicon.tex"
 
-version = "2.2.23"
+version = "2.2.24"
 server_filter_tags = {}
 local null_options = {
 	{ description = "", data = 0 }
@@ -67,7 +67,7 @@ local function MakeRangeOptions(first, last, step, textfn, datafn)
 	for value = first, last, step do
 		local data = datafn and datafn(value) or value
 		options[#options + 1] = {
-			description = textfn and textfn(value, data),
+			description = textfn and textfn(value, data) or data,
 			data = data,
 		}
 	end
